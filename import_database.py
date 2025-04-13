@@ -120,11 +120,14 @@ def get_table_columns(cursor, table_name):
     cursor.execute(f"PRAGMA table_info({table_name})")
     return [info[1] for info in cursor.fetchall()]
 
-def copy_table(table_name: str, input_cursor: sqlite3.Cursor, output_cursor: sqlite3.Cursor, version_id_mapping: dict):
+def copy_table(table_name: str, input_cursor: sqlite3.Cursor, output_cursor: sqlite3.Cursor, version_id_mapping: dict, conditions: str = None):
     columns = get_table_columns(input_cursor, table_name)
     input_version_ids = list(version_id_mapping.keys())
     placeholders = ",".join(["?" for _ in input_version_ids])
-    input_cursor.execute(f"SELECT * FROM {table_name} WHERE version_id IN ({placeholders})", input_version_ids)
+    query = f"SELECT * FROM {table_name} WHERE version_id IN ({placeholders})"
+    if conditions is not None:
+        query += f" AND {conditions}"
+    input_cursor.execute(query, input_version_ids)
     input_rows = input_cursor.fetchall()
 
     insert_columns = [col for col in columns if col != "id"]
@@ -249,7 +252,7 @@ def main():
         output_conn.commit()
         copy_table("hashes", input_cursor, output_cursor, version_id_mapping)
         output_conn.commit()
-        copy_table("config_files", input_cursor, output_cursor, version_id_mapping)
+        copy_table("config_files", input_cursor, output_cursor, version_id_mapping, "type = 1")
         output_conn.commit()
     except sqlite3.Error as error:
         print(f"Database error: {error}")

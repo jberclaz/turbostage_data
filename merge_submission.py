@@ -7,7 +7,7 @@ Merge a user-submitted config JSON into the global TurboStage game database.
 Usage:
     python merge_submission.py submission.json /path/to/legal/archives/
 """
-
+import gzip
 import json
 import sys
 import hashlib
@@ -20,18 +20,26 @@ from typing import Dict, Any
 # --------------------------------------------------------------------------- #
 # CONFIG – EDIT THESE PATHS
 # --------------------------------------------------------------------------- #
-GLOBAL_DB_PATH = pathlib.Path("archive/database.json")   # relative to script
+GLOBAL_DB_PATH = pathlib.Path("archive/database.json.gz")   # relative to script
 ARCHIVE_ROOT   = pathlib.Path("/path/to/legal/archives")      # <-- SET THIS
 
 # --------------------------------------------------------------------------- #
+
 def load_json(path: pathlib.Path) -> Dict[str, Any]:
     if not path.exists():
         print(f"Error: {path} not found.")
         sys.exit(1)
+    if str(path).endswith(".gz"):
+        with gzip.open(str(path), "rt") as f:
+            return json.load(f)
     return json.loads(path.read_text())
 
 def save_json(path: pathlib.Path, data: Dict[str, Any]):
-    path.write_text(json.dumps(data, indent=2) + "\n")
+    if str(path).endswith(".gz"):
+        with gzip.open(str(path), "wt") as f:
+            f.write(json.dumps(data))
+    else:
+        path.write_text(json.dumps(data, indent=2) + "\n")
     print(f"Saved: {path}")
 
 def md5_of_file_in_zip(zip_path: pathlib.Path, inner_path: str) -> str:

@@ -11,9 +11,12 @@ Usage:
 """
 
 import gzip
+import hashlib
 import json
 import os
 import sys
+import tempfile
+import zipfile
 from datetime import datetime
 
 PAGE_SIZE = 15
@@ -182,7 +185,8 @@ def show_game(data: dict, entry: tuple[str, dict], db_path: str):
                     print(f"      ... and {len(hashes)-8} more")
             print()
 
-        print(f"  Commands: U(set/download URL)  R(remove URL)  B(back)  Q(quit)")
+        has_urls = any(has_url(v) for v in versions.values())
+        print(f"  Commands: U(set/download URL)  R(remove URL)  V(verify hashes)  H(regen hashes)  B(back)  Q(quit)")
         cmd = input("  > ").strip().lower()
 
         if cmd == "q":
@@ -193,6 +197,10 @@ def show_game(data: dict, entry: tuple[str, dict], db_path: str):
             edit_url(data, igdb_id_str, versions, db_path)
         elif cmd == "r":
             remove_url(data, igdb_id_str, versions, db_path)
+        elif cmd == "v":
+            verify_hashes(igdb_id_str, versions)
+        elif cmd == "h":
+            regen_hashes(data, igdb_id_str, versions, db_path)
         else:
             print("  Unknown command.")
             input("  Press Enter...")
@@ -247,6 +255,148 @@ def remove_url(data: dict, igdb_id_str: str, versions: dict, db_path: str):
         print(f"  Removed download_url from {removed} version(s) of game {igdb_id_str}.")
     else:
         print("  No download URLs to remove for this game.")
+    input("  Press Enter...")
+
+
+def regen_hashes(data: dict, igdb_id_str: str, versions: dict, db_path: str):
+    """Download the archive, recompute all hashes, and update the database."""
+    import requests
+
+    confirm = input("  This will replace all stored hashes with freshly computed ones. Continue? (y/N): ").strip().lower()
+    if confirm != "y":
+        print("  Cancelled.")
+        input("  Press Enter...")
+        return
+
+    for ver_name, ver in versions.items():
+        url = ver.get("download_url", "")
+        if not url:
+            print(f"  Version '{ver_name}' has no download URL, skipping.")
+            continue
+
+        print(f"\n  Version '{ver_name}':")
+        print(f"    Downloading {url} ...")
+
+        try:
+            r = requests.get(url, stream=True, timeout=30)
+            r.raise_for_status()
+        except Exception as e:
+            print(f"    FAILED to download: {e}")
+            continue
+
+        with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
+            for chunk in r.iter_content(chunk_size=65536):
+                tmp.write(chunk)
+            tmp_path = tmp.name
+
+        print(f"    Downloaded to {tmp_path}")
+        print(f"    Computing hashes for all files...")
+
+        new_hashes = {}
+        try:
+            with zipfile.ZipFile(tmp_path, "r") as zf:
+                for info in zf.infolist():
+                    if info.is_dir():
+                        continue
+                    fname = info.filename
+                    file_hash = hashlib.md5(zf.read(fname)).hexdigest()
+                    new_hashes[fname] = file_hash
+                    print(f"      {fname}: {file_hash}")
+
+            print(f"\n    Computed {len(new_hashes)} hash(es).")
+            ver["hashes"] = new_hashes
+            save(db_path, data)
+            print(f"    Updated hashes for game {igdb_id_str} version '{ver_name}'.")
+        except Exception as e:
+            print(f"    FAILED: {e}")
+        finally:
+            os.unlink(tmp_path)
+
+    input("  Press Enter...")
+
+
+def verify_hashes(igdb_id_str: str, versions: dict):
+    """Download the archive and verify file hashes match the database."""
+    import requests
+
+    for ver_name, ver in versions.items():
+        url = ver.get("download_url", "")
+        if not url:
+            print(f"  Version '{ver_name}' has no download URL, skipping.")
+            continue
+
+        db_hashes = ver.get("hashes", {})
+        if not db_hashes:
+            print(f"  Version '{ver_name}' has no hashes stored, skipping.")
+            continue
+
+        print(f"\n  Version '{ver_name}':")
+        print(f"    Downloading {url} ...")
+
+        try:
+            r = requests.get(url, stream=True, timeout=30)
+            r.raise_for_status()
+        except Exception as e:
+            print(f"    FAILED to download: {e}")
+            continue
+
+        with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
+            for chunk in r.iter_content(chunk_size=65536):
+                tmp.write(chunk)
+            tmp_path = tmp.name
+
+        print(f"    Downloaded to {tmp_path}")
+        print(f"    Verifying {len(db_hashes)} file hash(es)...")
+
+        try:
+            with zipfile.ZipFile(tmp_path, "r") as zf:
+                zip_names = zf.namelist()
+
+                matched = 0
+                mismatched = 0
+                missing = 0
+
+                for fname, expected_hash in db_hashes.items():
+                    if fname not in zip_names:
+                        # Try matching by basename (some zips strip directory prefixes)
+                        basename = os.path.basename(fname)
+                        candidates = [n for n in zip_names if os.path.basename(n) == basename]
+                        if len(candidates) == 1:
+                            fname = candidates[0]
+                        else:
+                            print(f"    MISSING  {fname}")
+                            missing += 1
+                            continue
+
+                    actual = hashlib.md5(zf.read(fname)).hexdigest()
+                    if actual == expected_hash:
+                        print(f"    OK       {fname}")
+                        matched += 1
+                    else:
+                        print(f"    MISMATCH {fname}")
+                        print(f"      expected: {expected_hash}")
+                        print(f"      actual:   {actual}")
+                        mismatched += 1
+
+                print(f"\n    Result: {matched} ok, {mismatched} mismatched, {missing} missing")
+
+                # Show any extra files in the zip not in the DB
+                db_fnames = set(db_hashes.keys())
+                # Also check basename-matching entries
+                for fname in list(db_hashes.keys()):
+                    candidates = [n for n in zip_names if os.path.basename(n) == os.path.basename(fname)]
+                    db_fnames.update(candidates)
+                extra = set(zip_names) - db_fnames
+                if extra:
+                    print(f"    Extra files in zip (not in DB): {', '.join(sorted(extra)[:10])}")
+                    if len(extra) > 10:
+                        print(f"      ... and {len(extra)-10} more")
+
+        except Exception as e:
+            print(f"    FAILED to verify archive: {e}")
+        finally:
+            os.unlink(tmp_path)
+
     input("  Press Enter...")
 
 

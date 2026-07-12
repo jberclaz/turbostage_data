@@ -16,8 +16,11 @@ import json
 import os
 import sys
 import tempfile
+import time
 import zipfile
 from datetime import datetime
+
+CACHE_DIR = "/tmp/turbostage-db-editor-cache"
 
 PAGE_SIZE = 15
 
@@ -186,7 +189,7 @@ def show_game(data: dict, entry: tuple[str, dict], db_path: str):
             print()
 
         has_urls = any(has_url(v) for v in versions.values())
-        print(f"  Commands: U(set/download URL)  R(remove URL)  V(verify hashes)  H(regen hashes)  B(back)  Q(quit)")
+        print(f"  Commands: U(set/download URL)  R(remove URL)  V(verify hashes)  H(regen hashes)  E(edit exe paths)  B(back)  Q(quit)")
         cmd = input("  > ").strip().lower()
 
         if cmd == "q":
@@ -201,6 +204,8 @@ def show_game(data: dict, entry: tuple[str, dict], db_path: str):
             verify_hashes(igdb_id_str, versions)
         elif cmd == "h":
             regen_hashes(data, igdb_id_str, versions, db_path)
+        elif cmd == "e":
+            edit_executables(data, igdb_id_str, versions, db_path)
         else:
             print("  Unknown command.")
             input("  Press Enter...")
@@ -258,8 +263,133 @@ def remove_url(data: dict, igdb_id_str: str, versions: dict, db_path: str):
     input("  Press Enter...")
 
 
+def edit_executables(data: dict, igdb_id_str: str, versions: dict, db_path: str):
+    """Download the archive, list its files, and let the user pick
+    executable and config_executable paths."""
+    import requests
+
+    ver_names = list(versions.keys())
+    if len(ver_names) == 1:
+        ver_name = ver_names[0]
+    else:
+        print(f"  Versions: {', '.join(f'{i+1}. {n}' for i, n in enumerate(ver_names))}")
+        choice = input("  Select version number: ").strip()
+        if not choice.isdigit() or int(choice) < 1 or int(choice) > len(ver_names):
+            input("  Invalid selection. Press Enter...")
+            return
+        ver_name = ver_names[int(choice) - 1]
+
+    ver = versions[ver_name]
+    url = ver.get("download_url", "")
+    if not url:
+        print(f"  Version '{ver_name}' has no download URL.")
+        input("  Press Enter...")
+        return
+
+    print(f"  Downloading {url} ...")
+    try:
+        tmp_path = _download_archive(url)
+    except Exception as e:
+        print(f"    FAILED to download: {e}")
+        input("  Press Enter...")
+        return
+
+    try:
+        with zipfile.ZipFile(tmp_path, "r") as zf:
+            files = [info.filename for info in zf.infolist() if not info.is_dir()]
+            files.sort()
+
+        print(f"\n  Files in archive ({len(files)} total):")
+        for i, fname in enumerate(files, 1):
+            print(f"    {i:4d}. {fname}")
+
+        current_exe = ver.get("executable", "")
+        current_cfg = ver.get("config_executable", "")
+
+        print()
+        print(f"  Current executable       : {current_exe or '(not set)'}")
+        print(f"  Current config_executable: {current_cfg or '(not set)'}")
+
+        # Pick executable
+        print()
+        exe_choice = input(f"  Executable number (Enter to keep, 0 to clear): ").strip()
+        if exe_choice == "0":
+            ver["executable"] = ""
+            print("  Cleared executable.")
+        elif exe_choice.isdigit() and 1 <= int(exe_choice) <= len(files):
+            ver["executable"] = files[int(exe_choice) - 1]
+            print(f"  Set executable to: {ver['executable']}")
+
+        # Pick config_executable
+        cfg_choice = input(f"  Config executable number (Enter to keep, 0 to clear): ").strip()
+        if cfg_choice == "0":
+            ver["config_executable"] = ""
+            print("  Cleared config_executable.")
+        elif cfg_choice.isdigit() and 1 <= int(cfg_choice) <= len(files):
+            ver["config_executable"] = files[int(cfg_choice) - 1]
+            print(f"  Set config_executable to: {ver['config_executable']}")
+
+        save(db_path, data)
+        print(f"  Updated executables for game {igdb_id_str} version '{ver_name}'.")
+
+    except Exception as e:
+        print(f"    FAILED: {e}")
+
+    input("  Press Enter...")
+
+
+def _download_archive(url: str) -> str:
+    """Download a URL to a cached file and return the path.
+    Caches in /tmp by URL hash; reuses if less than 1 hour old."""
+    import requests
+
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    cache_key = hashlib.md5(url.encode()).hexdigest()
+    cache_path = os.path.join(CACHE_DIR, cache_key)
+
+    if os.path.exists(cache_path):
+        age = time.time() - os.path.getmtime(cache_path)
+        if age < 3600:
+            print(f"    Using cached {cache_path} ({int(age)}s old)")
+            return cache_path
+        print(f"    Cache expired ({int(age)}s old), re-downloading...")
+
+    r = requests.get(url, stream=True, timeout=30)
+    r.raise_for_status()
+    total = int(r.headers.get("content-length", 0))
+    downloaded = 0
+    with open(cache_path, "wb") as f:
+        for chunk in r.iter_content(chunk_size=65536):
+            f.write(chunk)
+            if total:
+                downloaded += len(chunk)
+                pct = int(downloaded * 100 / total)
+                bar = "#" * (pct // 5) + "." * (20 - pct // 5)
+                print(f"    Downloading [{bar}] {pct}%", end="\r")
+    if total:
+        full_bar = "#" * 20
+        print(f"    Downloading [{full_bar}] 100%")
+    else:
+        print(f"    Downloaded {downloaded} bytes")
+    return cache_path
+
+
+def _compute_md5_from_zip(zf: zipfile.ZipFile, fname: str) -> str:
+    """Compute the MD5 hash of a file inside a ZIP archive (matching
+    turbostage.utils.compute_md5_from_zip)."""
+    h = hashlib.md5()
+    with zf.open(fname) as f:
+        for chunk in iter(lambda: f.read(4096), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def regen_hashes(data: dict, igdb_id_str: str, versions: dict, db_path: str):
-    """Download the archive, recompute all hashes, and update the database."""
+    """Download the archive, recompute hashes, and update the database.
+    Matches turbostage's `add_game_worker` algorithm:
+      - hash the top 4 largest files
+      - also hash the executable if it's not among them
+    """
     import requests
 
     confirm = input("  This will replace all stored hashes with freshly computed ones. Continue? (y/N): ").strip().lower()
@@ -278,30 +408,39 @@ def regen_hashes(data: dict, igdb_id_str: str, versions: dict, db_path: str):
         print(f"    Downloading {url} ...")
 
         try:
-            r = requests.get(url, stream=True, timeout=30)
-            r.raise_for_status()
+            tmp_path = _download_archive(url)
         except Exception as e:
             print(f"    FAILED to download: {e}")
             continue
 
-        with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
-            for chunk in r.iter_content(chunk_size=65536):
-                tmp.write(chunk)
-            tmp_path = tmp.name
-
         print(f"    Downloaded to {tmp_path}")
-        print(f"    Computing hashes for all files...")
 
-        new_hashes = {}
         try:
             with zipfile.ZipFile(tmp_path, "r") as zf:
-                for info in zf.infolist():
-                    if info.is_dir():
-                        continue
-                    fname = info.filename
-                    file_hash = hashlib.md5(zf.read(fname)).hexdigest()
+                # Collect all non-directory files
+                files = [
+                    (info.filename, info.file_size)
+                    for info in zf.infolist()
+                    if not info.is_dir()
+                ]
+                # Top 4 largest files
+                files.sort(key=lambda x: x[1], reverse=True)
+                largest = files[:4]
+
+                new_hashes = {}
+
+                # Hash the top 4
+                for fname, size in largest:
+                    file_hash = _compute_md5_from_zip(zf, fname)
                     new_hashes[fname] = file_hash
-                    print(f"      {fname}: {file_hash}")
+                    print(f"    {fname} ({size} bytes): {file_hash}")
+
+                # Also hash the executable if it's not already covered
+                executable = ver.get("executable") or ver.get("binary", "")
+                if executable and executable not in new_hashes:
+                    hash_exe = _compute_md5_from_zip(zf, executable)
+                    new_hashes[executable] = hash_exe
+                    print(f"    {executable} (executable): {hash_exe}")
 
             print(f"\n    Computed {len(new_hashes)} hash(es).")
             ver["hashes"] = new_hashes
@@ -309,14 +448,13 @@ def regen_hashes(data: dict, igdb_id_str: str, versions: dict, db_path: str):
             print(f"    Updated hashes for game {igdb_id_str} version '{ver_name}'.")
         except Exception as e:
             print(f"    FAILED: {e}")
-        finally:
-            os.unlink(tmp_path)
 
     input("  Press Enter...")
 
 
 def verify_hashes(igdb_id_str: str, versions: dict):
-    """Download the archive and verify file hashes match the database."""
+    """Download the archive and verify file hashes match the database.
+    Also checks that the archive contains the executable and config_executable."""
     import requests
 
     for ver_name, ver in versions.items():
@@ -334,16 +472,10 @@ def verify_hashes(igdb_id_str: str, versions: dict):
         print(f"    Downloading {url} ...")
 
         try:
-            r = requests.get(url, stream=True, timeout=30)
-            r.raise_for_status()
+            tmp_path = _download_archive(url)
         except Exception as e:
             print(f"    FAILED to download: {e}")
             continue
-
-        with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
-            for chunk in r.iter_content(chunk_size=65536):
-                tmp.write(chunk)
-            tmp_path = tmp.name
 
         print(f"    Downloaded to {tmp_path}")
         print(f"    Verifying {len(db_hashes)} file hash(es)...")
@@ -368,7 +500,7 @@ def verify_hashes(igdb_id_str: str, versions: dict):
                             missing += 1
                             continue
 
-                    actual = hashlib.md5(zf.read(fname)).hexdigest()
+                    actual = _compute_md5_from_zip(zf, fname)
                     if actual == expected_hash:
                         print(f"    OK       {fname}")
                         matched += 1
@@ -380,22 +512,37 @@ def verify_hashes(igdb_id_str: str, versions: dict):
 
                 print(f"\n    Result: {matched} ok, {mismatched} mismatched, {missing} missing")
 
+                # Check executable paths exist in archive
+                print()
+                for label in ("executable", "config_executable"):
+                    path = ver.get(label, "")
+                    if not path:
+                        continue
+                    if path in zip_names:
+                        print(f"    OK       {label}: {path}")
+                    else:
+                        basename = os.path.basename(path)
+                        candidates = [n for n in zip_names if os.path.basename(n) == basename]
+                        if len(candidates) == 1:
+                            print(f"    MISMATCH {label}: {path} (basename found as '{candidates[0]}')")
+                        elif len(candidates) > 1:
+                            print(f"    MISMATCH {label}: {path} (basename matches: {candidates})")
+                        else:
+                            print(f"    MISSING  {label}: {path}")
+
                 # Show any extra files in the zip not in the DB
                 db_fnames = set(db_hashes.keys())
-                # Also check basename-matching entries
                 for fname in list(db_hashes.keys()):
                     candidates = [n for n in zip_names if os.path.basename(n) == os.path.basename(fname)]
                     db_fnames.update(candidates)
                 extra = set(zip_names) - db_fnames
                 if extra:
-                    print(f"    Extra files in zip (not in DB): {', '.join(sorted(extra)[:10])}")
+                    print(f"\n    Extra files in zip (not in DB): {', '.join(sorted(extra)[:10])}")
                     if len(extra) > 10:
                         print(f"      ... and {len(extra)-10} more")
 
         except Exception as e:
             print(f"    FAILED to verify archive: {e}")
-        finally:
-            os.unlink(tmp_path)
 
     input("  Press Enter...")
 

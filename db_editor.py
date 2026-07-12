@@ -20,6 +20,8 @@ import time
 import zipfile
 from datetime import datetime
 
+from turbostage.utils import compute_md5_from_zip as _compute_md5_from_zip
+
 CACHE_DIR = "/tmp/turbostage-db-editor-cache"
 
 PAGE_SIZE = 15
@@ -314,7 +316,7 @@ def edit_executables(data: dict, igdb_id_str: str, versions: dict, db_path: str)
         print()
         exe_choice = input(f"  Executable number (Enter to keep, 0 to clear): ").strip()
         if exe_choice == "0":
-            ver["executable"] = ""
+            ver["executable"] = None
             print("  Cleared executable.")
         elif exe_choice.isdigit() and 1 <= int(exe_choice) <= len(files):
             ver["executable"] = files[int(exe_choice) - 1]
@@ -323,7 +325,7 @@ def edit_executables(data: dict, igdb_id_str: str, versions: dict, db_path: str)
         # Pick config_executable
         cfg_choice = input(f"  Config executable number (Enter to keep, 0 to clear): ").strip()
         if cfg_choice == "0":
-            ver["config_executable"] = ""
+            ver["config_executable"] = None
             print("  Cleared config_executable.")
         elif cfg_choice.isdigit() and 1 <= int(cfg_choice) <= len(files):
             ver["config_executable"] = files[int(cfg_choice) - 1]
@@ -372,16 +374,6 @@ def _download_archive(url: str) -> str:
     else:
         print(f"    Downloaded {downloaded} bytes")
     return cache_path
-
-
-def _compute_md5_from_zip(zf: zipfile.ZipFile, fname: str) -> str:
-    """Compute the MD5 hash of a file inside a ZIP archive (matching
-    turbostage.utils.compute_md5_from_zip)."""
-    h = hashlib.md5()
-    with zf.open(fname) as f:
-        for chunk in iter(lambda: f.read(4096), b""):
-            h.update(chunk)
-    return h.hexdigest()
 
 
 def regen_hashes(data: dict, igdb_id_str: str, versions: dict, db_path: str):

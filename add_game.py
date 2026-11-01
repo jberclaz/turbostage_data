@@ -9,8 +9,10 @@ Usage:
 """
 
 import argparse
+import importlib.resources
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import zipfile
@@ -19,8 +21,15 @@ import zipfile
 from db_editor import load, save
 
 import requests
-from turbostage.dosbox_runner import run_dosbox
+from turbostage.game_launcher import build_dosbox_command
+from turbostage.game_metadata import GameMetadataCatalog
 from turbostage.utils import compute_hash_for_largest_files_in_zip, compute_md5_from_zip
+
+
+def run_dosbox(dosbox_path: str, executable: str) -> None:
+    """Run a game the way TurboStage does: its base config, then the executable."""
+    base_conf = str(importlib.resources.files("turbostage").joinpath("conf/dosbox-staging.conf"))
+    subprocess.run(build_dosbox_command(dosbox_path, base_conf) + [executable], check=True)
 
 
 def prompt_choices(items: list[str], label: str, allow_none: bool = True) -> str | None:
@@ -82,10 +91,8 @@ def main():
 
         if game_name:
             try:
-                from turbostage.igdb_client import IgdbClient
-
-                client = IgdbClient()
-                results = client.search_games(game_name)
+                # TurboStage's bundled IGDB snapshot of all DOS games: no API key needed.
+                results = GameMetadataCatalog().search_games(game_name)
                 if results:
                     print(f"\n  IGDB results for '{game_name}':")
                     for i, g in enumerate(results, 1):

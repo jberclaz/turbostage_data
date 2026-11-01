@@ -11,7 +11,8 @@ From this directory:
 ../turbostage/venv/bin/pip install requests
 ```
 
-This makes `turbostage.utils` and `turbostage.dosbox_runner` available to scripts here.
+This makes the `turbostage` package (hashing helpers, the game catalog and the DOSBox command
+builder) available to scripts here.
 
 ## Tools
 
